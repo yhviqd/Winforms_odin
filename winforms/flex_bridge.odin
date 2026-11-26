@@ -147,6 +147,29 @@ flex_host_detach :: proc(host: ^Flex_Host, idx: int) {
     flex_detach(&host.tree, idx)
 }
 
+// Walk a box and ALL of its descendants, nulling the bridge's ^Control slot.
+// flex_detach() keeps first_child / next on the detached root, so the whole
+// sub-tree is still reachable even after it is unlinked from its parent.
+@private flex_clear_branch :: proc(host: ^Flex_Host, i: int) {
+    if host == nil || i < 0 || i >= len(host.tree.boxes) do return
+    if i < len(host.controls) do host.controls[i] = nil
+    for c := host.tree.boxes[i].first_child; c != FLEX_NONE; c = host.tree.boxes[c].next {
+        flex_clear_branch(host, c)
+    }
+}
+
+// Full release for a closed TabPage: unlink the box (so flex_host_apply keeps
+// skipping it) AND drop the stale ^Control pointers. The tree.boxes array is
+// append-only by design, but after this no entry can hand a freed HWND to
+// SetWindowPos. Guards against idx == root, which would otherwise clear the
+// ENTIRE window if a page ever forgot to call wf_tag_set().
+flex_host_release_branch :: proc(host: ^Flex_Host, idx: int) {
+    if host == nil || idx < 0 || idx >= len(host.tree.boxes) do return
+    if idx == host.tree.root do return
+    flex_host_detach(host, idx)
+    flex_clear_branch(host, idx)
+}
+
 // Recompute and apply. Call once at onLoad, and again on every onSizeChanged.
 flex_host_apply :: proc(host: ^Flex_Host) {
     if host.form == nil do return

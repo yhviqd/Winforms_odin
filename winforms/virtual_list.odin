@@ -166,6 +166,33 @@ wf_virtual_find :: proc(lv: ^ListView) -> ^WF_VirtualList
     return nil
 }
 
+// Remove one record from the global list. Called from WM_NCDESTROY so a
+// closed Big Data page does not leave a 100k-entry row_map (approx. 400 KB)
+// and a dangling vl.lv behind.
+@private wf_virtual_unlink :: proc(vl: ^WF_VirtualList)
+{
+    fresh := make([dynamic]^WF_VirtualList)
+    for v in wf_vlists {
+        if v == vl do continue
+        append(&fresh, v)
+    }
+    delete(wf_vlists)
+    wf_vlists = fresh
+}
+
+@private wf_virtual_finalize :: proc(vl: ^WF_VirtualList)
+{
+    if vl == nil do return
+    // base[] holds wf_dup_string() copies made with context.allocator.
+    for s in vl.base {
+        if len(s) > 0 do delete(s)
+    }
+    delete(vl.base)
+    delete(vl.row_map)
+    wf_virtual_unlink(vl)
+    free(vl)
+}
+
 wf_virtual_set_row_count :: proc(lv: ^ListView, rows_in: i32)
 {
     vl := wf_virtual_find(lv)
@@ -505,6 +532,11 @@ wf_virtual_get_row_count :: proc(lv: ^ListView) -> i32
     // Remove OUR subclass entry but keep the chain alive: the stock
     // lv_wnd_proc still needs WM_NCDESTROY for its own dtor / subclass cleanup.
     if msg == WM_NCDESTROY {
+        // Our subclass was installed LAST, so it runs FIRST on WM_NCDESTROY:
+        // `lv` is still alive (lv_finalize has not run yet) and wf_virtual_find
+        // still resolves. Reclaim BEFORE the chain reaches lv_wnd_proc.
+        // Without this, every close/reopen of Big Data leaks row_map + base.
+        if vl != nil do wf_virtual_finalize(vl)
         rfn : SUBCLASSPROC = wf_vl_wnd_proc
         RemoveWindowSubclass(hw, rfn, sc_id)
     }

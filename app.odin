@@ -89,6 +89,7 @@ g_comp_dept  : ^ui.ComboBox
 g_comp_ctab  : ^ui.TabControl
 g_comp_tab_box : int = -1
 g_adduser    : ^ui.Form
+g_add_flex  : ui.Flex_Host
 g_add_name   : ^ui.TextBox
 g_add_role   : ^ui.TextBox
 g_add_target : rawptr = nil        // the ListBox of the page that opened it
@@ -332,8 +333,23 @@ tab_confirm_close :: proc(tab: ^ui.TabControl, index: i32,
 }
 
 tab_page_closing :: proc(tab: ^ui.TabControl, page: ^ui.TabPage, index: i32) {
-    box := ui.wf_tag_int(cast(^ui.Control) page)
-    if box >= 0 do ui.flex_host_detach(&g_flex, int(box))
+    pctl := cast(^ui.Control) page
+    box := ui.wf_tag_int(pctl)
+
+    // 1) Unlink the flex box AND null every ^Control in its sub-tree, so a
+    //    later flex_host_apply() can never touch a destroyed HWND.
+    if box >= 0 do ui.flex_host_release_branch(&g_flex, int(box))
+
+    // 2) Remove the page + all hosted controls from frm._controls and wf_tags.
+    //    This hook runs BEFORE wf_tab_remove_one() calls DestroyWindow(), so
+    //    the structs are still valid here; their WM_NCDESTROY frees them.
+    ui.wf_unregister_page(frm, pctl)
+
+    // 3) g_add_target is a rawptr to a ListBox on some page. It is always
+    //    re-assigned by add_user_dialog(), so clearing it is harmless and
+    //    prevents it from dangling after this page is gone.
+    g_add_target = nil
+
     ui.statusbar_set_text(sbar, 2, "tab closed")
     ptf("TabControl: closing tab %d, detached flex box %d\n", index, box)
 }
@@ -364,18 +380,82 @@ add_user_cancel :: proc(_: rawptr, _: ^ui.EventArgs) {
 }
 
 build_add_user_modal :: proc() {
-    g_adduser = ui.new_modal_form(frm, "新建用户", 380, 220)
-    ui.new_label(g_adduser, "填写下面的信息，点「确定」加入列表；「取消」或 Esc 放弃。",
-                 16, 14, 340, 20)
-    ui.new_label(g_adduser, "姓名", 16, 48, 60, 22)
-    g_add_name = ui.new_textbox(g_adduser, 84, 46, 260, 26)
-    ui.new_label(g_adduser, "角色", 16, 86, 60, 22)
-    g_add_role = ui.new_textbox(g_adduser, 84, 84, 260, 26)
+    // ------------------------------------------------------------------
+    // ONE flex tree for the WHOLE dialog -- same pattern as
+    // build_components_modal below. No hard-coded x,y anywhere.
+    //
+    // Constructors still take w/h placeholders: label_ctor sets
+    //   autoSize = (w != 0 || h != 0) ? false : true
+    // so 0,0 would switch autoSize back ON and fight flex_host_apply().
+    // Only x,y are ignored (they are 0 and later overwritten by layout).
+    // ------------------------------------------------------------------
+    g_adduser = ui.new_modal_form(frm, "新建用户", 380, 240)
+    d := g_adduser
+
+    hint  := ui.new_label(d, "填写下面的信息，点「确定」加入列表；「取消」或 Esc 放弃。",
+                          0, 0, 340, 34)
+    lname := ui.new_label(d, "姓名", 0, 0, 60, 22)
+    g_add_name = ui.new_textbox(d, 0, 0, 260, 26)
+    lrole := ui.new_label(d, "角色", 0, 0, 60, 22)
+    g_add_role = ui.new_textbox(d, 0, 0, 260, 26)
     ui.control_set_text(cast(^ui.Control) g_add_role, "Viewer")
-    ok := ui.new_button(g_adduser, "确定", 170, 132, 90, 30)
+
+    ok := ui.new_button(d, "确定", 0, 0, 90, 30)
     ok.onClick = add_user_ok
-    cancel := ui.new_button(g_adduser, "取消", 270, 132, 90, 30)
+    cancel := ui.new_button(d, "取消", 0, 0, 90, 30)
     cancel.onClick = add_user_cancel
+
+    // ---- root: Column, everything stretched horizontally ----
+    ui.flex_host_init(&g_add_flex, d)
+    ui.flex_host_box(&g_add_flex, ui.Flex_Style{
+        direction = .Column, gap = 8,
+        padding = ui.flex_edges_all(12), align_items = .Stretch,
+    })
+
+    ui.flex_host_leaf(&g_add_flex, cast(^ui.Control) hint,
+                      ui.Flex_Style{width = ui.flex_fill(), height = ui.flex_px(34)})
+
+    // name row: label(60) | textbox(fill)
+    ui.flex_host_box(&g_add_flex, ui.Flex_Style{
+        direction = .Row, gap = 8, height = ui.flex_px(26), align_items = .Center,
+    })
+    ui.flex_host_leaf(&g_add_flex, cast(^ui.Control) lname,
+                      ui.Flex_Style{width = ui.flex_px(60), height = ui.flex_px(22)})
+    ui.flex_host_leaf(&g_add_flex, cast(^ui.Control) g_add_name,
+                      ui.Flex_Style{width = ui.flex_fill(), height = ui.flex_px(26)})
+    ui.flex_host_close(&g_add_flex)                        // name row
+
+    // role row: label(60) | textbox(fill)
+    ui.flex_host_box(&g_add_flex, ui.Flex_Style{
+        direction = .Row, gap = 8, height = ui.flex_px(26), align_items = .Center,
+    })
+    ui.flex_host_leaf(&g_add_flex, cast(^ui.Control) lrole,
+                      ui.Flex_Style{width = ui.flex_px(60), height = ui.flex_px(22)})
+    ui.flex_host_leaf(&g_add_flex, cast(^ui.Control) g_add_role,
+                      ui.Flex_Style{width = ui.flex_fill(), height = ui.flex_px(26)})
+    ui.flex_host_close(&g_add_flex)                        // role row
+
+    // Eat the remaining height so the footer sits at the bottom instead of
+    // being glued to the constructor's y=132 (the old "OK/Cancel too low"
+    // problem). Column main axis = height, so grow=1 works here too.
+    ui.flex_host_spacer(&g_add_flex, ui.Flex_Style{grow = 1})
+
+    // footer: spacer pushes OK / Cancel to the right, on their OWN row.
+    ui.flex_host_box(&g_add_flex, ui.Flex_Style{
+        direction = .Row, gap = 8, height = ui.flex_px(32), align_items = .Center,
+    })
+    ui.flex_host_spacer(&g_add_flex, ui.Flex_Style{grow = 1})
+    ui.flex_host_leaf(&g_add_flex, cast(^ui.Control) ok,
+                      ui.Flex_Style{width = ui.flex_px(90), height = ui.flex_px(30)})
+    ui.flex_host_leaf(&g_add_flex, cast(^ui.Control) cancel,
+                      ui.Flex_Style{width = ui.flex_px(90), height = ui.flex_px(30)})
+    ui.flex_host_close(&g_add_flex)                        // footer
+    ui.flex_host_close(&g_add_flex)                        // root
+
+    // REQUIRED. show_modal() only calls flex_host_apply() for hosts registered
+    // here (wf_modal_hosts[frm]). Without this line every control stays at
+    // its constructor x,y and the tree is dead weight.
+    ui.modal_set_flex_host(d, &g_add_flex)
 }
 
 add_user_dialog :: proc(sender: rawptr, _: ^ui.EventArgs) {
@@ -973,7 +1053,12 @@ MakeWindow :: proc()
     rb1 := new_radiobutton(gb2, "SubSystem:Windows", 0, 0, 180, 24)
     rb2 := new_radiobutton(gb2, "SubSystem:Console", 0, 0, 180, 24)
     lb2 = new_label(gb2, "Threads:", 0, 0, 70, 24)
-    np2 := new_numberpicker(gb2, 0, 0, 80, 27, btnLeft = true)
+    // 8 formal params on np_ctor3, 6 on np_ctor2. With ONLY `btnLeft` named,
+    // the 4 untyped ints (0,0,80,27) also fit np_ctor2 as
+    // x,y,deciPrec,step -> ambiguous. Naming deciPrec + step removes those
+    // positional slots from np_ctor2, leaving it unable to absorb 4 ints.
+    // Same shape as np1 above (which compiles).
+    np2 := new_numberpicker(gb2, 0, 0, 80, 27, deciPrec = 0, step = 1, btnLeft = true)
     np2.backColor = 0xcaffbf
     np2.textAlignment = .Center
     set_property(cb2, CheckBoxProps.Checked, true)

@@ -163,13 +163,20 @@ combo_set_selected_item:: proc(cmb: ^ComboBox, item: $T)
     // free_all(context.temp_allocator)
 }
 
+// Newer Odin compilers reject `return ""` from a `-> any` procedure: the
+// implicit any wraps a TEMPORARY string header on the stack, so the returned
+// data pointer would dangle. A package-level string has static storage, so
+// its any is safe. (Only this file returns a literal as `any`; all other
+// `return ""` in the library are `-> string` and are fine.)
+@private _combo_empty_item : string = ""
+
 // Get the selected item
 combo_get_selected_item:: proc(cmb: ^ComboBox) -> any
 {
     indx:= int(SendMessage(cmb.handle, CB_GETCURSEL, 0, 0))
     if indx > -1 {
         return cmb.items[indx]
-    } else do return ""
+    } else do return _combo_empty_item
 }
 
 // Delete the selected item

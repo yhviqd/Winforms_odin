@@ -457,6 +457,50 @@ wf_tag_from_sender :: proc(sender: rawptr) -> ^Control {
 
 
 // =============================================================================
+// Tier-5: closed-TabPage registry cleanup.
+//
+// control_base_init() appends EVERY control to `_ownerForm._controls`, and
+// wf_tag_set() keys wf_tags by the control pointer. Neither registry has a
+// removal path: DestroyWindow(page) frees the structs but leaves dangling
+// ^Control entries behind. Call this from onPageClosing, i.e. BEFORE
+// wf_tab_remove_one() destroys the HWND chain, while the structs are valid.
+// =============================================================================
+
+wf_tag_delete :: proc(ctl: ^Control) {
+    if ctl == nil || wf_tags == nil do return
+    delete_key(&wf_tags, rawptr(ctl))
+}
+
+@private wf_is_page_descendant :: proc(ctl: ^Control, page: ^Control) -> bool {
+    // Bounded walk: the library never builds a cyclic parent chain, but a
+    // corrupted pointer should not hang the UI thread either.
+    depth := 0
+    for c := ctl; c != nil && depth < 64; c = c.parent {
+        if c == page do return true
+        depth += 1
+    }
+    return false
+}
+
+// Drop the page itself plus every control hosted on it from the form's
+// control table, and remove all of their wf_tags entries. The array is
+// rebuilt (same pattern as wf_tab_remove_one) so no index is left dangling.
+wf_unregister_page :: proc(frm: ^Form, page: ^Control) {
+    if frm == nil || page == nil do return
+    fresh := make([dynamic]^Control)
+    for ctl in frm._controls {
+        if ctl == page || wf_is_page_descendant(ctl, page) {
+            wf_tag_delete(ctl)
+            continue
+        }
+        append(&fresh, ctl)
+    }
+    delete(frm._controls)
+    frm._controls = fresh
+}
+
+
+// =============================================================================
 // Tier-4 helper: PictureBox inside a TabPage / Panel.
 //
 // The stock `new_picturebox` hard-codes `p: ^Form` in its PUBLIC signature,
